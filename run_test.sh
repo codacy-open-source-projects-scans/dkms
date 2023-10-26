@@ -242,12 +242,15 @@ case "${os_id}" in
     sles | suse | opensuse)
         expected_dest_loc=updates
         ;;
-    arch | debian | ubuntu)
+    arch | debian | ubuntu | linuxmint)
         expected_dest_loc=updates/dkms
         ;;
     alpine)
         expected_dest_loc=kernel/extra
         mod_compression_ext=.gz
+        ;;
+    gentoo)
+        expected_dest_loc=kernel/extra
         ;;
     *)
         echo >&2 "Error: unknown Linux distribution ID ${os_id}"
