@@ -138,6 +138,16 @@ die() {
     [[ $die_is_fatal = yes ]] && exit $ret || return $ret
 }
 
+# Print a warning message and die with the passed error code.
+diewarn() {
+    # $1 = error code to return with
+    # rest = strings to print before we exit.
+    ret=$1
+    shift
+    warn "$@"
+    [[ $die_is_fatal = yes ]] && exit $ret || return $ret
+}
+
 mktemp_or_die() {
     local t
     t=$(mktemp "$@") && echo "$t" && return
@@ -148,13 +158,14 @@ mktemp_or_die() {
 show_usage()
 {
     echo $"Usage: $0 [action] [options]"
-    echo $"  [action]  = { add | remove | build | install | uninstall | match | autoinstall |"
-    echo $"                mktarball | ldtarball | status }"
+    echo $"  [action]  = { add | remove | build | unbuild | install | uninstall | match |"
+    echo $"               autoinstall | mktarball | ldtarball | status }"
     echo $"  [options] = [-m module] [-v module-version] [-k kernel-version] [-a arch]"
     echo $"              [-c dkms.conf-location] [-q] [--force] [--force-version-override] [--all]"
     echo $"              [--templatekernel=kernel] [--directive='cli-directive=cli-value']"
     echo $"              [--config=kernel-.config-location] [--archive=tarball-location]"
-    echo $"              [--kernelsourcedir=source-location]"
+    echo $"              [--kernelsourcedir=source-location] [--rpm_safe_upgrade]"
+    echo $"              [--dkmstree path] [--sourcetree path] [--installtree path]"
     echo $"              [--binaries-only] [--source-only] [--verbose]"
     echo $"              [--no-depmod] [--modprobe-on-install] [-j number] [--version]"
 }
@@ -324,23 +335,35 @@ do_depmod()
     else
         depmod -a "$1"
     fi
+    if [ -f /lib/modules/$1/modules.dep ] && [ ! -s /lib/modules/$1/modules.dep ]; then
+        # if modules.dep is empty, we just removed the last kernel module from
+        # no longer installed kernel $1, so do not leave stale depmod files around
+        rm -fv /lib/modules/$1/modules.{alias,dep,devname,softdep,symbols,*.bin}
+        rmdir --ignore-fail-on-non-empty /lib/modules/$1
+        test -d /lib/modules/$1 || echo $"Removed /lib/modules/$1"
+    fi
 }
 
 # Grab distro information from os-release.
 distro_version()
 {
-    [[ -r /etc/os-release ]] || die 4 $"System is missing /etc/os-release file."
-    (
-        . /etc/os-release
-        if [[ "$ID" = "ubuntu" ]]; then
-            # ID_LIKE=debian in ubuntu
-            echo $ID
-        elif [[ ${#ID_LIKE[@]} != 0 ]]; then
-            echo ${ID_LIKE[0]}
-        else
-            echo $ID
+    for f in /etc/os-release /usr/lib/os-release; do
+        if [[ -r $f ]]; then
+            (
+                . "$f"
+                if [[ "$ID" = "ubuntu" ]]; then
+                    # ID_LIKE=debian in ubuntu
+                    echo $ID
+                elif [[ ${#ID_LIKE[@]} != 0 ]]; then
+                    echo ${ID_LIKE[0]}
+                else
+                    echo $ID
+                fi
+            )
+            return
         fi
-    )
+    done
+    die 4 $"System is missing os-release file."
 }
 
 override_dest_module_location()
@@ -1009,8 +1032,10 @@ prepare_build()
     read_conf_or_die "$kernelver" "$arch"
 
     # Error out if build_exclude is set
-    [[ $build_exclude ]] && die 77 \
-        $"The $base_dir/dkms.conf for module $module includes a BUILD_EXCLUSIVE directive which does not match this kernel/arch/config."\
+    [[ $build_exclude ]] && diewarn 77 \
+        $"The $base_dir/dkms.conf"\
+        $"for module $module includes a BUILD_EXCLUSIVE directive"\
+        $"which does not match this kernel/arch/config."\
         $"This indicates that it should not be built."
 
     # Error out if source_tree is basically empty (binary-only dkms tarball w/ --force check)
@@ -2320,7 +2345,7 @@ unset CC CXX CFLAGS CXXFLAGS LDFLAGS
 # Set important variables
 current_kernel=$(uname -r)
 current_os=$(uname -s)
-running_distribution=$(distro_version)
+running_distribution=$(distro_version) || exit
 dkms_tree="/var/lib/dkms"
 source_tree="/usr/src"
 install_tree="/lib/modules"
