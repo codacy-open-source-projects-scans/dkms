@@ -248,14 +248,14 @@ case "${os_id}" in
         expected_dest_loc=extra
         mod_compression_ext=.xz
         ;;
-    sles | suse | opensuse)
+    sles | suse | opensuse*)
         expected_dest_loc=updates
+        mod_compression_ext=.zst
         ;;
     arch)
         expected_dest_loc=updates/dkms
-        mod_compression_ext=
         ;;
-    debian | ubuntu | linuxmint)
+    debian* | ubuntu | linuxmint)
         expected_dest_loc=updates/dkms
         ;;
     alpine)
@@ -271,9 +271,10 @@ case "${os_id}" in
         ;;
 esac
 
-grep "^CONFIG_MODULE_COMPRESS" "${kernel_config}" || true
-find  "/lib/modules/${KERNEL_VER}" -name \*.ko\* 2>/dev/null | head -n1
-echo "Expected module compression extension: ${mod_compression_ext:-(none)}"
+echo "Checking module compression ..."
+echo "config: $(grep "^CONFIG_MODULE_COMPRESS" "${kernel_config}" || true)"
+echo "files: $(find  "/lib/modules/${KERNEL_VER}" -name \*.ko\* 2>/dev/null | head -n1)"
+echo "Expected extension: ${mod_compression_ext:-(none)}"
 
 
 echo 'Preparing a clean test environment'
