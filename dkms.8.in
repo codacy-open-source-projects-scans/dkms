@@ -83,6 +83,7 @@ If
 is passed, this command behaves like the
 .B ldtarball
 command.
+.PP
 .SY remove
 .OP module/module\-version
 .OP -k kernel/arch
@@ -94,6 +95,7 @@ tree. If the module is currently installed, it first uninstalls it
 and if applicable, will replace it with its original_module. Use the
 .B \-\-all
 option in order to remove all instances for every kernel at once.
+.PP
 .SY build
 .OP module/module\-version
 .OP -k kernel/arch
@@ -115,6 +117,7 @@ can.
 If the module is already built, it will not be rebuilt again by default, and the
 .B --force
 option should be used to override this.
+.PP
 .SY unbuild
 .OP module/module\-version
 .OP -k kernel/arch
@@ -127,6 +130,7 @@ and if applicable, will replace it with its original_module. Finally all binary
 kernel modules are removed. Use the
 .B \-\-all
 option in order to remove all instances for every kernel at once.
+.PP
 .SY install
 .OP module/module\-version
 .OP -k kernel/arch
@@ -148,11 +152,14 @@ If the module is already installed, it will not be reinstalled again
 by default, and the
 .B --force
 option should be used to override this.
+If a different version of the module is installed for that kernel, it is
+uninstalled first, so that none of its kernel modules are left behind.
 If you pass a .rpm file, dkms will try to install that file with
 .BR "rpm -Uvh" ,
 and it will perform an
 .B autoinstall
 action to be sure that everything is built for your kernel if the RPM installed successfully.
+.PP
 .SY uninstall
 .OP module/module\-version
 .OP -k kernel/arch
@@ -165,6 +172,7 @@ current kernel if the -k option was not passed. Use the
 option in order to uninstall all instances for every kernel at once.
 After uninstall completion, the driver will be left in the built state.
 To completely remove a driver, the remove action should be utilized.
+.PP
 .SY match
 .OP --templatekernel kernel/arch
 .OP -k kernel/arch
@@ -178,6 +186,7 @@ Every module that is installed on the
 within
 .B dkms
 is then installed on that specified kernel.
+.PP
 .SY mktarball
 .OP module/module\-version
 .OP -k kernel/arch
@@ -207,6 +216,7 @@ on just one system and then use
 .B ldtarball
 on all of your other systems to get the same built modules loaded
 without having to wait for anything to compile.
+.PP
 .SY ldtarball
 .OP /path/to/tarball.tar
 .OP --force
@@ -223,6 +233,7 @@ exist where
 is attempting to place them, it will warn and not copy over them. The
 .B \-\-force
 option should be used to override this.
+.PP
 .SY status
 .OP module/module\-version
 .OP -k kernel/arch
@@ -240,11 +251,13 @@ Manual intervention is required.
 If only the symbolic link 'source' is missing, the
 .B add
 action may be used to re-add the module/version combination to dkms.
+.PP
 .SY autoinstall
 .YS
 .IP "" 4
 Attempt to install the latest revision of all modules that have been installed for other kernel revisions.
 The DKMS autoinstaller service is a stub that uses this action to perform its work.
+.PP
 .SY generate_mok
 .YS
 .IP "" 4
@@ -743,6 +756,34 @@ of another module that is managed by dkms. Do not specify a version or
 architecture in the dependency. A missing dependency requires the parameter
 .OP --force
 to still attempt the build of the module.
+
+When invoked through
+.B autoinstall ,
+unresolved dependencies are handled differently depending on whether they are
+known to dkms. A dependency that is itself a dkms-managed module but failed
+to install (for example because of a circular dependency or a build error)
+is treated as a hard failure and causes
+.B autoinstall
+to exit non-zero. A dependency that is
+.I not
+registered with dkms at the time
+.B autoinstall
+runs is treated as deferred: a warning is emitted and the dependent module is left in the
+.B added
+state, but
+.B autoinstall
+exits successfully. This avoids spurious failures during multi-package
+installs where the dependency's source package has not yet had its postinst
+run, or where the dependency is supplied by something outside dkms. The
+dependent module will be picked up by the next
+.B autoinstall
+trigger once the dependency becomes available.
+
+Example: Ubuntu system with module A and module B depending on A. During an update, both
+the kernel and module A get updated, so
+.B autoinstall
+runs as a kernel post hook. This means the whole dependency logic fails because module A is not
+yet installed to satisfy module B.
 .TP
 .B BUILD_DEPENDS_REBUILD=
 If this directive is set to

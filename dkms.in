@@ -513,7 +513,7 @@ override_dest_module_location()
     [[ ${addon_modules_dir} ]] && echo "/${addon_modules_dir}" && return
 
     case "$running_distribution" in
-    fedora* | rhel* | ovm*)
+    fedora* | centos* | rhel*)
         echo "/extra" && return
         ;;
     sles* | suse* | opensuse*)
@@ -1285,7 +1285,7 @@ prepare_kernel()
     # Check that kernel-source exists
     _check_kernel_dir "$1" || {
         die 21 "Your kernel headers for kernel $1 cannot be found at $install_tree/$1/build or $install_tree/$1/source." \
-            "Please install the linux-headers-$1 package or use the --kernelsourcedir option to tell DKMS where it's located."
+            "Please install your distribution's kernel headers package matching $1, or use the --kernelsourcedir option to tell DKMS where it's located."
     }
 }
 
@@ -1776,6 +1776,13 @@ do_install()
     local -r lib_tree="$install_tree/$kernelver"
     local -r original_module_backup_dir="$dkms_tree/$module/original_module/$kernelver/$arch"
     local -r active_link="$dkms_tree/$module/kernel-$kernelver-$arch"
+    # The version currently active for this kernel/arch, if any. It gets
+    # uninstalled once the new version has passed the sanity checks.
+    local old_active_version
+    if [[ -L $active_link ]]; then
+        old_active_version=$(readlink "$active_link")
+        old_active_version=${old_active_version%%/*}
+    fi
     local count
     local index
     local symlink
@@ -1828,14 +1835,14 @@ do_install()
     # nothing installed.
     [[ $rpm_safe_upgrade ]] && force="true"
 
-    # Save the original_module if one exists, none have been saved before, and this is the first module for this kernel
-    local any_module_installed
-
     if ! run_build_script pre_install "$pre_install" && ! [[ $force ]]; then
         die 101 "pre_install failed, aborting install." \
             "You may override by specifying --force."
     fi
 
+    # Decide which modules to install before touching the install tree: the
+    # version sanity check has to run against what is currently there.
+    local -a modules_to_install=()
     for ((count=0; count < num_modules; count++)); do
         # Skip modules that are excluded due to BUILD_EXCLUSIVE restrictions
         if ! check_build_exclusive_for_module "$count" "$kernelver" "$arch"; then
@@ -1845,6 +1852,24 @@ do_install()
         # Check this version against what is already in the kernel
         check_version_sanity "$kernelver" "$arch" "$obsolete_by" "${dest_module_name[$count]}" || continue
 
+        modules_to_install+=("$count")
+    done
+
+    if ((num_modules > 0)) && ((${#modules_to_install[@]} == 0)); then
+        die 6 "Installation aborted."
+    fi
+
+    # Uninstall the version currently active for this kernel/arch, so none of
+    # its modules linger in the install tree: they may have different names
+    # or a different compression suffix than the ones installed below.
+    # depmod runs once, after the new modules are in place.
+    if [[ $old_active_version ]]; then
+        (module_version="$old_active_version" delayed_depmod=1 do_uninstall "$kernelver" "$arch") || \
+            die 6 "Failed to uninstall $module/$old_active_version for kernel $kernelver ($arch)."
+    fi
+
+    # Save the original_module if one exists, none have been saved before, and this is the first module for this kernel
+    for count in "${modules_to_install[@]}"; do
         local m
         local installed_modules
         local module_count
@@ -1906,13 +1931,7 @@ do_install()
         echo "Installing $dest_dir/$dest_name"
         mkdir -p "$dest_dir"
         CP -f $symlink "$toinstall" "$dest_dir/$dest_name" || die 6 "Copying '$toinstall' failed"
-        any_module_installed=1
-
     done
-
-    if ((num_modules > 0)) && [[ ! "${any_module_installed}" ]]; then
-        die 6 "Installation aborted."
-    fi
 
     # Create the kernel-<kernelver> symlink to designate this version as active
     rm -f "$active_link"
@@ -1935,6 +1954,9 @@ do_install()
             "Install Failed (depmod problems). Module rolled back to built state."
         exit 6
     }
+    # depmod just ran for this kernel; drop any pending marker left by the
+    # uninstall of the previous version.
+    rm -f "${dkms_tree:?}/depmod-pending-$kernelver-$arch"
 
     if [[ $modprobe_on_install ]] && [[ $kernelver = "$(uname -r)" ]]; then
         # Make the newly installed modules available immediately
@@ -2214,8 +2236,11 @@ do_uninstall()
 
 module_is_broken_and_die() {
     is_module_broken "$module" "$module_version" && die 4 "$module/$module_version is broken!"\
-        "Missing the source directory or the symbolic link pointing to it."\
-        "Manual intervention is required!"
+        "Missing the source directory or the symbolic link pointing to it:"\
+        "$dkms_tree/$module/$module_version/source"\
+        "Manual intervention is required!"\
+        "If this module version is no longer needed, you can remove the stale directory."\
+        "Otherwise, reinstall the package that provides its source."
 }
 
 module_is_added_or_die()
@@ -2561,8 +2586,11 @@ do_status() {
         case $status in
             broken)
                 echo "$m/$v: $status"
-                error "$m/$v: Missing the module source directory or the symbolic link pointing to it."\
-                    "Manual intervention is required!"
+                error "$m/$v: Missing the module source directory or the symbolic link pointing to it:"\
+                    "$dkms_tree/$m/$v/source"\
+                    "Manual intervention is required!"\
+                    "If this module version is no longer needed, you can remove the stale directory."\
+                    "Otherwise, reinstall the package that provides its source."
                 ;;
             added)
                 echo "$m/$v: $status"
@@ -2855,8 +2883,11 @@ run_match()
         # Continue if the status is broken, as there is nothing we can do
         if is_module_broken "$template_module" "$template_version"; then
             error "$template_module/$template_version is broken!"\
-                "Missing the source directory or the symbolic link pointing to it."\
-                "Manual intervention is required!"
+                "Missing the source directory or the symbolic link pointing to it:"\
+                "$dkms_tree/$template_module/$template_version/source"\
+                "Manual intervention is required!"\
+                "If this module version is no longer needed, you can remove the stale directory."\
+                "Otherwise, reinstall the package that provides its source."
             continue
         fi
         maybe_build_module "$template_module" "$template_version" "$kernelver" "$arch"
@@ -2994,6 +3025,8 @@ autoinstall() {
     local -a installed_modules
     local -a skipped_modules
     local -a failed_modules
+    local -a unresolved_modules
+    local -a deferred_modules
     local -A build_depends
     local -A latest
 
@@ -3004,8 +3037,11 @@ autoinstall() {
         IFS='/' read -r m v k a <<< "$mvka"
         # If the module status is broken there is nothing that can be done
         if [[ $status = broken ]]; then
-            error "$m/$v is broken! Missing the source directory or the symbolic link pointing to it."\
-                "Manual intervention is required!"
+            error "$m/$v is broken! Missing the source directory or the symbolic link pointing to it:"\
+                "$dkms_tree/$m/$v/source"\
+                "Manual intervention is required!"\
+                "If this module version is no longer needed, you can remove the stale directory."\
+                "Otherwise, reinstall the package that provides its source."
             continue
         fi
         if [[ ! ${latest[$m]} ]]; then
@@ -3104,12 +3140,52 @@ autoinstall() {
         echo "Autoinstall on ${kernelver[0]} failed for module(s) ${failed_modules[*]}."
     fi
 
+    # Classify modules with unresolved BUILD_DEPENDS:
+    #
+    #   "real" missing dependency:
+    #
+    #   The dependency is a DKMS-managed module (in known_modules) that we tried but could
+    #   not install (e.g. circular dependency, build failure of the dependency).
+    #
+    #   "deferred" missing dependency:
+    #
+    #   The dependency is not registered with DKMS at all. This commonly happens during
+    #   multi-package installs where the dependency's source package has not yet been configured
+    #   by dpkg/rpm, so its postinst hasn't run `dkms add` yet. The dependency may also be
+    #   supplied by something outside DKMS entirely. Either way, the current autoinstall run
+    #   cannot make progress on it, but a later trigger (the dependency package's own postinst,
+    #   or a re-run of this hook) will. Don't fail the whole transaction in that case.
+    local d is_known real_missing_deps deferred_deps
     for mv in "${to_install[@]}"; do
         IFS=/ read -r m v <<< "$mv"
-        echo "$m/$v autoinstall failed due to missing dependencies: ${build_depends[$m]}."
+        real_missing_deps=
+        deferred_deps=
+        for d in ${build_depends[$m]}; do
+            is_known=
+            for k in "${known_modules[@]}"; do
+                [[ "$d" = "$k" ]] && { is_known=1; break; }
+            done
+            if [[ $is_known ]]; then
+                real_missing_deps="$real_missing_deps $d"
+            else
+                deferred_deps="$deferred_deps $d"
+            fi
+        done
+        if [[ $real_missing_deps ]]; then
+            echo "$m/$v autoinstall failed due to missing dependencies:$real_missing_deps."
+            unresolved_modules[${#unresolved_modules[@]}]="$mv"
+        else
+            echo "$m/$v autoinstall deferred: BUILD_DEPENDS not registered with DKMS:$deferred_deps."
+            deferred_modules[${#deferred_modules[@]}]="$mv"
+        fi
     done
 
-    if (( ${#failed_modules[@]} > 0 || ${#to_install[@]} > 0 )); then
+    if (( ${#deferred_modules[@]} > 0 )); then
+        echo "Autoinstall on ${kernelver[0]} deferred module(s) ${deferred_modules[*]} due to BUILD_DEPENDS not yet registered with DKMS."
+        echo "These may be provided externally or by a package not yet configured; autoinstall will retry on the next trigger."
+    fi
+
+    if (( ${#failed_modules[@]} > 0 || ${#unresolved_modules[@]} > 0 )); then
         die 11 "One or more modules failed to install during autoinstall." \
             "Refer to previous errors for more information."
     fi
